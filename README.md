@@ -4,7 +4,7 @@ An open, privacy-respecting alternative client for **Skoda Connect / Skoda Plus*
 
 > Unofficial project. Not made by, affiliated with, or endorsed by Skoda Auto or Volkswagen Group. Use at your own risk. See [Disclaimer](#disclaimer).
 
-![OpenSkoda](docs/banner.png)
+![OpenSkoda](docs/banner-gemini.png)
 
 ## UI Preview
 
