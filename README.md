@@ -6,6 +6,17 @@ An open, privacy-respecting alternative client for **Skoda Connect / Skoda Plus*
 
 ![OpenSkoda](docs/banner.png)
 
+## UI Preview
+
+![OpenSkoda UI Collage](docs/showcase-collage.png)
+
+<p align="center">
+  <img src="docs/screens/home-dashboard.png" alt="Home dashboard" width="220" />
+  <img src="docs/screens/vehicle-info.png" alt="Vehicle info" width="220" />
+  <img src="docs/screens/widget-style.png" alt="Widget style" width="220" />
+  <img src="docs/screens/ownership-fuel-spend.png" alt="Ownership and fuel spend" width="220" />
+</p>
+
 [![Latest release](https://img.shields.io/github/v/release/darushah/openskoda?label=download&sort=semver)](https://github.com/darushah/openskoda/releases/latest) [![Downloads](https://img.shields.io/github/downloads/darushah/openskoda/total)](https://github.com/darushah/openskoda/releases)
 
 ## Download
