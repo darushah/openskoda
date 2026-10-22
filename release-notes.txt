@@ -1,0 +1,19 @@
+﻿OpenSkoda v1.0.0
+
+First public OpenSkoda release for Skoda Connect (India).
+
+Highlights
+- Live telemetry (fuel, battery, odometer, trips, events)
+- Ownership and owner profile improvements
+- Address mapping fixes in Owner info
+- Android Auto overview aligned with app data
+- Refreshed futuristic app icon
+- Privacy mode and dark mode
+- Home-screen widgets support
+
+Download
+- APK: OpenSkoda-v1.0.0.apk
+
+Credits
+Huge thanks to @biswatma for the original OpenVW project that inspired this fork:
+https://github.com/biswatma/openvw
