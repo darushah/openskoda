@@ -115,11 +115,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         if (tok.isEmpty()) { fail("Could not reach Skoda Connect (try again)"); return@launch }
         session.token = tok; session.refreshToken = auth.optString("refreshToken")
         val reg = Api.registerUser(mob, session.installationID, tok)
-        val regOk = reg.optBoolean("isSuccessful") || reg.optBoolean("success")
+        val regOk = reg.optBoolean("isSuccessful") || reg.optBoolean("success") || reg.optInt("messagecode") == 200
         if (!regOk) { fail(reg.optString("message", "Could not send OTP")); return@launch }
-        val loginId = reg.deepIntAny("loginId", "loginID", "LoginId")
-        val userId = reg.deepIntAny("userId", "userID", "UserId")
-        if (loginId == 0) { fail("Could not start OTP session (missing LoginId)"); return@launch }
+        val (loginId, userId) = extractOtpSessionIds(reg)
         if (userId == 0) { fail("Could not start OTP session (missing UserId)"); return@launch }
         session.loginId = loginId
         session.userId = userId
@@ -135,8 +133,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     viewModelScope.launch {
       if (session.loginId == 0 || session.userId == 0) {
         val reg = runCatching { Api.registerUser(session.mobile, session.installationID, session.token) }.getOrNull()
-        reg?.deepIntAny("loginId", "loginID", "LoginId")?.takeIf { it > 0 }?.let { session.loginId = it }
-        reg?.deepIntAny("userId", "userID", "UserId")?.takeIf { it > 0 }?.let { session.userId = it }
+        reg?.let {
+          val (loginId, userId) = extractOtpSessionIds(it)
+          if (loginId > 0) session.loginId = loginId
+          if (userId > 0) session.userId = userId
+        }
       }
       val resend = runCatching {
         Api.resendLoginOTP(session.loginId, session.userId, session.mobile, session.installationID, session.token)
@@ -155,7 +156,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     busy = true; message = null
     viewModelScope.launch {
       try {
-        if (session.loginId == 0 || session.userId == 0) {
+        if (session.userId == 0) {
           fail("Session expired. Please resend code and try again")
           return@launch
         }
@@ -374,16 +375,39 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
   private fun fail(m: String) { busy = false; message = m; if (phase == Phase.LOADING) phase = if (session.verified) Phase.READY else Phase.LOGIN }
 
+  private fun normKey(key: String): String =
+    key.lowercase(Locale.ENGLISH).replace(Regex("[^a-z0-9]"), "")
+
+  private fun keyMatches(actual: String, wanted: String): Boolean {
+    if (actual.equals(wanted, ignoreCase = true)) return true
+    return normKey(actual) == normKey(wanted)
+  }
+
+  private fun rawToInt(raw: Any?): Int {
+    return when (raw) {
+      is Number -> raw.toInt()
+      is String -> {
+        raw.trim().toIntOrNull()
+          ?: Regex("-?\\d+").find(raw)?.value?.toIntOrNull()
+          ?: 0
+      }
+      else -> 0
+    }
+  }
+
   private fun JSONObject.optIntAny(vararg keys: String): Int {
     for (key in keys) {
-      if (!has(key)) continue
-      val raw = opt(key)
-      when (raw) {
-        is Number -> {
-          val v = raw.toInt()
+      if (has(key)) {
+        val v = rawToInt(opt(key))
+        if (v != 0) return v
+      }
+      val it = keys()
+      while (it.hasNext()) {
+        val actual = it.next()
+        if (keyMatches(actual, key)) {
+          val v = rawToInt(opt(actual))
           if (v != 0) return v
         }
-        is String -> raw.toIntOrNull()?.takeIf { it != 0 }?.let { return it }
       }
     }
     return 0
@@ -465,6 +489,32 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
       }
     }
     return null
+  }
+
+  private fun decodeRegPayload(reg: JSONObject): JSONObject? {
+    val encrypted = reg.optStringAny("data", "response", "encryptedResponse", "rqt")
+    if (encrypted.isBlank() || !encrypted.matches(Regex("[0-9A-Fa-f]+"))) return null
+    for (k in listOf(Crypto.GEN, Crypto.DATA)) {
+      val plain = runCatching { Crypto.decHex(encrypted, k) }.getOrNull().orEmpty()
+      if (plain.isBlank()) continue
+      val obj = runCatching { JSONObject(plain) }.getOrNull()
+      if (obj != null) return obj
+    }
+    return null
+  }
+
+  private fun extractOtpSessionIds(reg: JSONObject): Pair<Int, Int> {
+    val loginKeys = arrayOf("loginId", "loginID", "LoginId", "login_id", "loginid")
+    val userKeys = arrayOf("userId", "userID", "UserId", "user_id", "userid")
+    var loginId = reg.deepIntAny(*loginKeys)
+    var userId = reg.deepIntAny(*userKeys)
+    if (loginId != 0 && userId != 0) return loginId to userId
+
+    decodeRegPayload(reg)?.let { decoded ->
+      if (loginId == 0) loginId = decoded.deepIntAny(*loginKeys)
+      if (userId == 0) userId = decoded.deepIntAny(*userKeys)
+    }
+    return loginId to userId
   }
 
   private fun JSONObject.deepBooleanAny(vararg keys: String): Boolean? {
