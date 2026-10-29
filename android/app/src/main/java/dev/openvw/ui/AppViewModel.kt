@@ -446,16 +446,39 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
   private fun fail(m: String) { busy = false; message = m; if (phase == Phase.LOADING) phase = if (session.verified) Phase.READY else Phase.LOGIN }
 
+  private fun normKey(key: String): String =
+    key.lowercase(Locale.ENGLISH).replace(Regex("[^a-z0-9]"), "")
+
+  private fun keyMatches(actual: String, wanted: String): Boolean {
+    if (actual.equals(wanted, ignoreCase = true)) return true
+    return normKey(actual) == normKey(wanted)
+  }
+
+  private fun rawToInt(raw: Any?): Int {
+    return when (raw) {
+      is Number -> raw.toInt()
+      is String -> {
+        raw.trim().toIntOrNull()
+          ?: Regex("-?\\d+").find(raw)?.value?.toIntOrNull()
+          ?: 0
+      }
+      else -> 0
+    }
+  }
+
   private fun JSONObject.optIntAny(vararg keys: String): Int {
     for (key in keys) {
-      if (!has(key)) continue
-      val raw = opt(key)
-      when (raw) {
-        is Number -> {
-          val v = raw.toInt()
+      if (has(key)) {
+        val v = rawToInt(opt(key))
+        if (v != 0) return v
+      }
+      val it = keys()
+      while (it.hasNext()) {
+        val actual = it.next()
+        if (keyMatches(actual, key)) {
+          val v = rawToInt(opt(actual))
           if (v != 0) return v
         }
-        is String -> raw.toIntOrNull()?.takeIf { it != 0 }?.let { return it }
       }
     }
     return 0
@@ -537,6 +560,32 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
       }
     }
     return null
+  }
+
+  private fun decodeRegPayload(reg: JSONObject): JSONObject? {
+    val encrypted = reg.optStringAny("data", "response", "encryptedResponse", "rqt")
+    if (encrypted.isBlank() || !encrypted.matches(Regex("[0-9A-Fa-f]+"))) return null
+    for (k in listOf(Crypto.GEN, Crypto.DATA)) {
+      val plain = runCatching { Crypto.decHex(encrypted, k) }.getOrNull().orEmpty()
+      if (plain.isBlank()) continue
+      val obj = runCatching { JSONObject(plain) }.getOrNull()
+      if (obj != null) return obj
+    }
+    return null
+  }
+
+  private fun extractOtpSessionIds(reg: JSONObject): Pair<Int, Int> {
+    val loginKeys = arrayOf("loginId", "loginID", "LoginId", "login_id", "loginid")
+    val userKeys = arrayOf("userId", "userID", "UserId", "user_id", "userid")
+    var loginId = reg.deepIntAny(*loginKeys)
+    var userId = reg.deepIntAny(*userKeys)
+    if (loginId != 0 && userId != 0) return loginId to userId
+
+    decodeRegPayload(reg)?.let { decoded ->
+      if (loginId == 0) loginId = decoded.deepIntAny(*loginKeys)
+      if (userId == 0) userId = decoded.deepIntAny(*userKeys)
+    }
+    return loginId to userId
   }
 
   private fun JSONObject.deepBooleanAny(vararg keys: String): Boolean? {
