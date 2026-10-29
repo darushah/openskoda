@@ -42,6 +42,7 @@ import androidx.compose.ui.unit.sp
 import dev.openvw.R
 import dev.openvw.data.CarLook
 import dev.openvw.data.PlanInfo
+import dev.openvw.data.Repo
 import dev.openvw.data.Store
 import dev.openvw.theme.Border
 import dev.openvw.theme.Card
@@ -61,6 +62,7 @@ fun VehicleScreen(
   onPrivacy: (Boolean) -> Unit = {},
   onLogout: () -> Unit = {},
   onRegNo: (String) -> Unit = {},
+  onOwner: (name: String, email: String, address: String) -> Unit = { _, _, _ -> },
   onPaint: (String) -> Unit = {},
   onPrice: (Double) -> Unit = {},
   onDark: (Boolean) -> Unit = {},
@@ -68,6 +70,10 @@ fun VehicleScreen(
   var tab by remember { mutableStateOf(initialTab) }
   var regEditor by remember { mutableStateOf(false) }
   var regDraft by remember { mutableStateOf(Store.vehicle.regNo) }
+  var ownerEditor by remember { mutableStateOf(false) }
+  var nameDraft by remember { mutableStateOf("") }
+  var emailDraft by remember { mutableStateOf("") }
+  var addressDraft by remember { mutableStateOf("") }
   Column(Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
     BackBar(onBack, showBack = false, trailing = {
       // quick light/dark toggle (same setting as Owner info → Dark mode)
@@ -199,6 +205,45 @@ fun VehicleScreen(
         Box(Modifier.fillMaxWidth().height(1.dp).background(LineSoft))
         val ownerAddress = Store.owner.address.trim()
         InfoRow("Address", if (ownerAddress.isNotEmpty()) ownerAddress else "Add your address", muted = ownerAddress.isEmpty())
+        Box(
+          Modifier.fillMaxWidth().padding(bottom = 12.dp)
+            .clickable {
+              nameDraft = Store.owner.name.takeIf { it != Repo.owner.name }.orEmpty()
+              emailDraft = Store.owner.email
+              addressDraft = ownerAddress
+              ownerEditor = true
+            },
+          contentAlignment = Alignment.CenterStart,
+        ) {
+          Text("Edit owner info", style = TextStyle(color = Ink, fontSize = 12.sp, fontWeight = FontWeight.SemiBold))
+        }
+      }
+
+      if (ownerEditor) {
+        AlertDialog(
+          onDismissRequest = { ownerEditor = false },
+          title = { Text("Owner info") },
+          text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+              OutlinedTextField(value = nameDraft, onValueChange = { nameDraft = it }, singleLine = true, label = { Text("Name") })
+              OutlinedTextField(value = emailDraft, onValueChange = { emailDraft = it }, singleLine = true, label = { Text("Email ID") })
+              OutlinedTextField(value = addressDraft, onValueChange = { addressDraft = it }, label = { Text("Address") })
+              Text(
+                "Saved on this phone only. Leave a field empty to use your account's details.",
+                style = TextStyle(color = Muted, fontSize = 12.sp),
+              )
+            }
+          },
+          confirmButton = {
+            TextButton(onClick = {
+              onOwner(nameDraft, emailDraft, addressDraft)
+              ownerEditor = false
+            }) { Text("Save") }
+          },
+          dismissButton = {
+            TextButton(onClick = { ownerEditor = false }) { Text("Cancel") }
+          },
+        )
       }
 
       // Dark mode toggle

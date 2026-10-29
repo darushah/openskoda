@@ -162,6 +162,7 @@ private fun MainApp(vm: AppViewModel) {
                   onPrivacy = { vm.setPrivacy(it) },
                   onLogout = { vm.logout() },
                   onRegNo = { vm.setVehicleRegNoManual(it) },
+                  onOwner = { name, email, address -> vm.setOwnerDetails(name, email, address) },
                   onPaint = { vm.setPaint(it) },
                   onPrice = { vm.setFuelPrice(it) },
                   onDark = { vm.setDark(it) },

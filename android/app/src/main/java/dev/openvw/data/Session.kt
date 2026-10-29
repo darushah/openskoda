@@ -31,6 +31,16 @@ class Session(context: Context) {
   var carId: String get() = s("carId"); set(v) = put("carId", v)
   var cerenceToken: String get() = s("cerenceToken"); set(v) = put("cerenceToken", v)
   var teleToken: String get() = s("teleToken"); set(v) = put("teleToken", v)
+  // Cerence end-user login: OTP session between send and verify, and the refresh token for teleToken
+  var otpSessionId: String get() = s("otpSessionId"); set(v) = put("otpSessionId", v)
+  var teleRefreshToken: String get() = s("teleRefreshToken"); set(v) = put("teleRefreshToken", v)
+  // owner from the Cerence login (no profile endpoint to re-read it later)
+  var ownerName: String get() = s("ownerName"); set(v) = put("ownerName", v)
+  var ownerEmail: String get() = s("ownerEmail"); set(v) = put("ownerEmail", v)
+  // owner details typed in on this phone (no server API to change them); "" = use the account's
+  var nameOverride: String get() = s("nameOverride"); set(v) = put("nameOverride", v)
+  var emailOverride: String get() = s("emailOverride"); set(v) = put("emailOverride", v)
+  var addressOverride: String get() = s("addressOverride"); set(v) = put("addressOverride", v)
   var telePhone: String get() = s("telePhone"); set(v) = put("telePhone", v)
   var connectedSince: String get() = s("connectedSince", ""); set(v) = put("connectedSince", v)
   var regNoOverride: String get() = s("regNoOverride", ""); set(v) = put("regNoOverride", v)
@@ -40,9 +50,11 @@ class Session(context: Context) {
   var dark: Boolean get() = sp.getBoolean("dark", false); set(v) = sp.edit().putBoolean("dark", v).apply()
   var privacy: Boolean get() = sp.getBoolean("privacy", false); set(v) = sp.edit().putBoolean("privacy", v).apply()
 
-  val loggedIn: Boolean get() = verified && installationID != 0 && loginId != 0
+  // Not gated on loginId: the Cerence login has none.
+  val loggedIn: Boolean get() = verified && installationID != 0
 
   fun clearAuth() {
-    verified = false; token = ""; crmToken = ""; teleToken = ""; cerenceToken = ""
+    verified = false; token = ""; crmToken = ""; teleToken = ""; cerenceToken = ""; teleRefreshToken = ""; otpSessionId = ""; ownerName = ""; ownerEmail = ""
+    nameOverride = ""; emailOverride = ""; addressOverride = ""
   }
 }
