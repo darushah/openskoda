@@ -1,6 +1,7 @@
 package dev.openvw.ui
 
 import android.app.Application
+import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -47,6 +48,8 @@ import org.json.JSONObject
 
 enum class Phase { BOOTING, LOGIN, OTP, LOADING, READY }
 
+private const val TAG = "OpenSkoda"
+
 class AppViewModel(app: Application) : AndroidViewModel(app) {
   val session = Session(app)
 
@@ -69,6 +72,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
   private var lastProfileSyncAt = 0L
   private var lastUserInfoPayload: JSONObject? = null
   private var lastVehicleProfilePayload: JSONObject? = null
+  /** Owner as the account reports it; [Store.owner] is this with the phone-only edits on top. */
+  private var accountOwner = Repo.owner
 
   init {
     phone = session.mobile
@@ -77,6 +82,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     Store.fuelPrice = session.fuelPrice.toDouble()
     Store.dark = session.dark; dev.openvw.theme.Palette.dark = session.dark
     Store.connectedSince = session.connectedSince
+    restoreOwner()
     if (session.loggedIn) { phase = Phase.LOADING; refresh() } else phase = Phase.LOGIN
   }
 
@@ -114,39 +120,36 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val tok = auth.optString("accessToken")
         if (tok.isEmpty()) { fail("Could not reach Skoda Connect (try again)"); return@launch }
         session.token = tok; session.refreshToken = auth.optString("refreshToken")
-        val reg = Api.registerUser(mob, session.installationID, tok)
-        val regOk = reg.optBoolean("isSuccessful") || reg.optBoolean("success") || reg.optInt("messagecode") == 200
-        if (!regOk) { fail(reg.optString("message", "Could not send OTP")); return@launch }
-        val (loginId, userId) = extractOtpSessionIds(reg)
-        if (userId == 0) { fail("Could not start OTP session (missing UserId)"); return@launch }
-        session.loginId = loginId
-        session.userId = userId
+        // OTP login goes through Cerence, like the official MySkoda Connected app. The savwconnect
+        // registerUser/verifyLoginOTP pair needs a loginId that some accounts never get (it comes back 0).
+        if (!sendCerenceOtp(mob)) return@launch
         busy = false; phase = Phase.OTP
       } catch (e: Exception) { fail(e.message ?: "Network error") }
     }
   }
+
+  /** Asks Cerence to SMS an OTP; keeps the sessionId the login call needs. False (with [message] set) on failure. */
+  private suspend fun sendCerenceOtp(mob: String): Boolean {
+    val r = Api.cerenceSendOtp(mob)
+    val sid = r.deepStringAny("sessionId")
+    Log.d(TAG, "cerence otp: status=${r.opt("_status")} keys=${r.keys().asSequence().toList()} " +
+      "sessionId=${if (sid.isBlank()) "missing" else "ok"} message=${r.cerenceError()}")
+    if (sid.isBlank()) { fail(r.cerenceError().ifBlank { "Could not send OTP" }); return false }
+    session.otpSessionId = sid
+    return true
+  }
+
+  /** Error text from a failed Cerence response ({message} / {error} / {errorCode}), or "". */
+  private fun JSONObject.cerenceError(): String =
+    deepStringAny("message", "errorMessage", "error_description", "error").ifBlank { optString("_raw").take(120) }
 
   /** Back from the OTP step to the phone-number step. */
   fun backToPhone() { busy = false; message = null; phase = Phase.LOGIN }
 
   fun resend() {
     viewModelScope.launch {
-      if (session.loginId == 0 || session.userId == 0) {
-        val reg = runCatching { Api.registerUser(session.mobile, session.installationID, session.token) }.getOrNull()
-        reg?.let {
-          val (loginId, userId) = extractOtpSessionIds(it)
-          if (loginId > 0) session.loginId = loginId
-          if (userId > 0) session.userId = userId
-        }
-      }
-      val resend = runCatching {
-        Api.resendLoginOTP(session.loginId, session.userId, session.mobile, session.installationID, session.token)
-      }.getOrNull()
-      if (resend != null && (resend.optBoolean("isSuccessful") || resend.optBoolean("success"))) {
-        message = "Code re-sent"
-      } else {
-        message = resend?.optString("message", "Could not resend code") ?: "Could not resend code"
-      }
+      val ok = runCatching { sendCerenceOtp(session.mobile) }.getOrDefault(false)
+      if (ok) message = "Code re-sent" else if (message == null) message = "Could not resend code"
     }
   }
 
@@ -156,18 +159,86 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     busy = true; message = null
     viewModelScope.launch {
       try {
-        if (session.userId == 0) {
-          fail("Session expired. Please resend code and try again")
-          return@launch
-        }
-        val r = Api.verifyLoginOTP(code, session)
-        if (!r.optBoolean("isSuccessful")) { fail(r.optString("message", "Incorrect code")); return@launch }
+        if (session.otpSessionId.isBlank()) { fail("Code expired. Tap Resend and try again"); return@launch }
+        val r = Api.cerenceLogin(session.otpSessionId, code)
+        val tokenInfo = r.optJSONObject("loginInfo")?.optJSONObject("tokenInfo") ?: r.optJSONObject("tokenInfo")
+        val access = tokenInfo?.optString("accessToken").orEmpty()
+        Log.d(TAG, "cerence login: status=${r.opt("_status")} keys=${r.keys().asSequence().toList()} " +
+          "accessToken=${if (access.isBlank()) "missing" else "ok"} message=${r.cerenceError()}")
+        if (access.isBlank()) { fail(r.cerenceError().ifBlank { "Incorrect code" }); return@launch }
+        session.otpSessionId = ""
+        session.teleToken = access
+        session.teleRefreshToken = tokenInfo?.optString("refreshToken").orEmpty()
+        session.telePhone = "+91" + session.mobile
+        // savwconnect ids are not part of this login; 0 keeps the savwconnect profile calls out of loadData()
+        session.loginId = 0; session.userId = 0; session.cerenceToken = ""; session.carId = ""
+        r.optJSONObject("userInfo")?.let { applyCerenceUser(it) }
+        loadUserCar()
         session.verified = true
-        if (r.has("signStamp")) session.signStamp = r.optLong("signStamp")
         busy = false; phase = Phase.LOADING
         loadData(); phase = Phase.READY; poll()
       } catch (e: Exception) { fail(e.message ?: "Network error") }
     }
+  }
+
+  /** Owner name/email and "connected since" from the Cerence userInfo, kept in the session for later starts. */
+  private fun applyCerenceUser(u: JSONObject) {
+    fun s(k: String) = u.optString(k).takeIf { it.isNotBlank() && it != "null" }.orEmpty()
+    // same order as the official app's profile page: "first last", else the nickname
+    val name = listOf(s("firstName"), s("lastName")).filter { it.isNotBlank() }.joinToString(" ").ifBlank { s("nickname") }
+    Log.d(TAG, "cerence user: " + listOf("firstName", "lastName", "nickname", "email", "createDate")
+      .joinToString(" ") { "$it=${if (s(it).isBlank()) "missing" else "ok"}" })
+    if (name.isNotBlank()) session.ownerName = name
+    if (s("email").isNotBlank()) session.ownerEmail = s("email")
+    restoreOwner()
+    val since = normalizeOwnershipDate(s("createDate"))
+    if (since.isNotBlank() && session.connectedSince.isBlank()) { session.connectedSince = since; Store.connectedSince = since }
+  }
+
+  /** Saved owner details -> Store (the savwconnect profile, when it loads, still overwrites them). */
+  private fun restoreOwner() {
+    setOwner(accountOwner.copy(
+      name = session.ownerName.ifBlank { accountOwner.name },
+      email = session.ownerEmail.ifBlank { accountOwner.email },
+      mobile = session.telePhone.ifBlank { accountOwner.mobile },
+    ))
+  }
+
+  private fun setOwner(o: Owner) {
+    accountOwner = o
+    Store.owner = o.copy(
+      name = session.nameOverride.ifBlank { o.name },
+      email = session.emailOverride.ifBlank { o.email },
+      address = session.addressOverride.ifBlank { o.address },
+    )
+  }
+
+  /** Owner info typed in on this phone; a blank field goes back to the account's value. */
+  fun setOwnerDetails(name: String, email: String, address: String) {
+    session.nameOverride = name.trim()
+    session.emailOverride = email.trim()
+    session.addressOverride = address.trim()
+    setOwner(accountOwner)
+  }
+
+  /** VIN, car id and reg no of the first car mapped to this Cerence user. */
+  private suspend fun loadUserCar() {
+    val r = Api.userCars(session.teleToken)
+    val car = r.optJSONArray("cars")?.optJSONObject(0)
+    Log.d(TAG, "cerence cars: status=${r.opt("_status")} count=${r.optJSONArray("cars")?.length()} " +
+      "carKeys=${car?.keys()?.asSequence()?.toList()}")
+    if (car == null) return
+    car.deepStringAny("vin").takeIf { it.isNotBlank() }?.let { session.vin = it }
+    // the official app titles the car with its inventory name ("Factory:<VIN>" unless the owner renamed it)
+    val name = car.optString("name").takeIf { it.isNotBlank() && it != "null" }
+      ?: session.vin.takeIf { it.isNotBlank() }?.let { "Factory:$it" }
+    if (name != null) Store.vehicle = Store.vehicle.copy(vehicleName = name)
+    car.optStringAny("carId", "_id", "id").takeIf { it.isNotBlank() }?.let { session.carId = it }
+    car.deepStringAny("registrationNumber").takeIf { it.isNotBlank() }?.let { reg ->
+      session.regNoOverride = reg
+      Store.vehicle = Store.vehicle.copy(regNo = reg)
+    }
+    car.deepStringAny("model").takeIf { it.isNotBlank() }?.let { Store.vehicle = Store.vehicle.copy(model = it) }
   }
 
   fun refresh() {
@@ -786,7 +857,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
       session.token = auth.optString("accessToken"); session.refreshToken = auth.optString("refreshToken")
     }
     // CRM token (may override bearer; often null — bootstrap token still works)
-    runCatching { Api.crmToken(session.userId, session.token) }.getOrNull()?.let { crm ->
+    if (session.userId != 0) runCatching { Api.crmToken(session.userId, session.token) }.getOrNull()?.let { crm ->
       val sfdc = crm.optString("sfdcToken")
       if (sfdc.isNotEmpty() && sfdc != "null") session.token = sfdc
     }
@@ -1009,23 +1080,37 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     if (prof != null) {
       val nm = Crypto.decOrSelf(prof.optString("name")).ifEmpty { Repo.owner.name }
       val addr = resolveOwnerAddress(prof, v, ui)
-      Store.owner = Owner(
+      setOwner(Owner(
         name = nm,
         email = Crypto.decOrSelf(prof.optString("primaryMailID")),
         mobile = session.telePhone.ifEmpty { "+91" + session.mobile },
         address = addr,
-      )
+      ))
     }
   }
 
   private suspend fun loadTelematics(full: Boolean) {
+    // Cerence OTP login: renew the expired end-user token with its refresh token
+    if (session.teleToken.isEmpty() && session.teleRefreshToken.isNotEmpty()) {
+      val r = Api.cerenceRefresh(session.teleRefreshToken)
+      val ti = r.optJSONObject("loginInfo")?.optJSONObject("tokenInfo") ?: r.optJSONObject("tokenInfo") ?: r
+      val access = ti.optString("accessToken")
+      Log.d(TAG, "cerence refresh: status=${r.opt("_status")} accessToken=${if (access.isBlank()) "missing" else "ok"}")
+      if (access.isNotBlank()) {
+        session.teleToken = access
+        ti.optString("refreshToken").takeIf { it.isNotBlank() }?.let { session.teleRefreshToken = it }
+      }
+    }
+    // Cerence login has no savwconnect profile to name the car: read it from the inventory once per app start
+    if (session.teleToken.isNotEmpty() && session.teleRefreshToken.isNotEmpty() &&
+      (session.vin.isEmpty() || Store.vehicle.vehicleName == Repo.vehicle.vehicleName)) loadUserCar()
     if (session.vin.isEmpty()) return
-    if (session.cerenceToken.isEmpty()) {
+    // savwconnect login: mint the end-user token from the CMS cerenceToken
+    if (session.teleToken.isEmpty() && session.cerenceToken.isEmpty() && session.userId != 0) {
       val ct = Api.cerenceToken(session.userId)
       session.cerenceToken = ct.optString("cerenceToken").ifEmpty { ct.optString("CerenceToken") }
     }
-    if (session.cerenceToken.isEmpty()) return
-    if (session.teleToken.isEmpty()) {
+    if (session.teleToken.isEmpty() && session.cerenceToken.isNotEmpty()) {
       val phone = normalizePhoneForTelematics(session.telePhone.ifEmpty { "+91" + session.mobile })
       val tt = Api.telematicsToken(session.cerenceToken, phone, session.vin)
       val tok = tt.optJSONObject("loginInfo")?.optJSONObject("tokenInfo")?.optString("accessToken")
@@ -1034,7 +1119,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
       else session.cerenceToken = "" // stale CMS token: re-fetch it on the next poll
       val teleAddr = resolveOwnerAddress(tt.optJSONObject("userInfo"), tt)
       if (teleAddr.isNotBlank()) {
-        Store.owner = Store.owner.copy(address = teleAddr)
+        setOwner(accountOwner.copy(address = teleAddr))
       }
       // "connected since" = the telematics account creation date
       tt.optJSONObject("userInfo")?.optString("createDate")?.takeIf { it.isNotEmpty() && session.connectedSince.isBlank() }?.let {
@@ -1160,15 +1245,24 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
       fragments = listOf("odometer", "mileage"),
       excludes = listOf("fuel", "trip", "since", "dtc", "mil", "engine", "avg", "average"),
     ) ?: old.odometerKm
+    // Engine ON/OFF (telemetry.engine), as the official app reads it (CarStatusParser): OFF = parked, whatever the
+    // telemetry still says — Speed/EngineSpeed keep their last value from the end of the drive.
+    val carStatus = sequenceOf(tj, t, t.optJSONObject("carStatus"), t.optJSONObject("data"))
+      .filterNotNull()
+      .flatMap { o -> sequenceOf(o.optString("engine"), o.optString("status")) }
+      .map { it.trim().uppercase() }
+      .firstOrNull { it == "ON" || it == "OFF" }
     val engineState = tj.optStringAny("engine", "engineStatus").trim()
     val engineOn = when {
+      carStatus != null -> carStatus == "ON"
       engineState.equals("on", ignoreCase = true) -> true
       engineState.equals("off", ignoreCase = true) -> false
       else -> gb("IsEngineOn", "engineOn", "ignitionOn") ?: old.engineOn
     }
+    val parked = carStatus == "OFF"
     Store.telemetry = Telemetry(
-      speedKmh = gi("Speed") ?: old.speedKmh,
-      rpm = rpm ?: old.rpm,
+      speedKmh = if (parked) null else gi("Speed") ?: old.speedKmh,
+      rpm = if (parked) null else rpm ?: old.rpm,
       fuelPct = fuelPct,
       batteryV = gd("ControlModuleVoltage") ?: old.batteryV,
       coolantC = gi("CoolantTemperature") ?: old.coolantC,
@@ -1195,7 +1289,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     } else if (Store.vehicle.regNo.isBlank() && session.regNoOverride.isNotBlank()) {
       Store.vehicle = Store.vehicle.copy(regNo = session.regNoOverride)
     }
-    Store.vehicle = Store.vehicle.copy(status = if ((Store.telemetry.speedKmh ?: 0) > 0 || Store.telemetry.engineOn) "Driving" else "Parked")
+    val moving = (Store.telemetry.speedKmh ?: 0) > 0
+    Store.vehicle = Store.vehicle.copy(status = when {
+      carStatus == "OFF" -> "Parked"
+      carStatus == "ON" -> if (moving) "Driving" else "Idling"
+      moving || Store.telemetry.engineOn -> "Driving"
+      else -> "Parked"
+    })
     // dongle health
     t.optJSONArray("devices")?.optJSONObject(0)?.let { d ->
       Store.dongle = Dongle(d.optInt("netSignal"), d.optString("status"), d.optJSONObject("firmware")?.optString("version") ?: "")

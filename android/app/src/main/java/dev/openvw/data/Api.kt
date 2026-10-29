@@ -197,6 +197,35 @@ object Api {
     json(text).put("_status", code)
   }
 
+  // ---------- Cerence end-user login (what the official MySkoda Connected app uses) ----------
+  // POST {countryCode:"+91", phoneNumber} -> SMS + {sessionId}
+  suspend fun cerenceSendOtp(mobile: String): JSONObject = withContext(Dispatchers.IO) {
+    val body = JSONObject().put("countryCode", "+91").put("phoneNumber", mobile).toString()
+    val (code, text) = req("POST", "$CERENCE/api/identity/v1/auth/users/end-user/otp", body, null)
+    jsonOrRaw(text).put("_status", code)
+  }
+
+  // POST {loginType:0, username:"mobile", sessionId, password:otp} -> {loginInfo:{tokenInfo}, userInfo}
+  suspend fun cerenceLogin(sessionId: String, otp: String): JSONObject = withContext(Dispatchers.IO) {
+    val body = JSONObject().put("loginType", 0).put("username", "mobile")
+      .put("sessionId", sessionId).put("password", otp).toString()
+    val (code, text) = req("POST", "$CERENCE/api/identity/v1/auth/users/end-user/login", body, null)
+    jsonOrRaw(text).put("_status", code)
+  }
+
+  suspend fun cerenceRefresh(refreshToken: String): JSONObject = withContext(Dispatchers.IO) {
+    val body = JSONObject().put("refreshToken", refreshToken).toString()
+    val (code, text) = req("POST", "$CERENCE/api/identity/v1/auth/users/refresh/token", body, null)
+    jsonOrRaw(text).put("_status", code)
+  }
+
+  /** Cars mapped to the signed-in user; the response is a bare JSON array, returned as {cars: [...]}. */
+  suspend fun userCars(teleToken: String): JSONObject = withContext(Dispatchers.IO) {
+    val (code, text) = req("GET", "$CERENCE/api/inventory/v1/cars/user-mapped", null, teleToken)
+    val cars = runCatching { JSONArray(text) }.getOrNull()
+    (if (cars != null) JSONObject().put("cars", cars) else jsonOrRaw(text)).put("_status", code)
+  }
+
   suspend fun resolveCar(vin: String, teleToken: String): JSONObject = withContext(Dispatchers.IO) {
     val (code, text) = req("GET", "$CERENCE/api/v1/car?vin=$vin", null, teleToken)
     json(text).put("_status", code)
